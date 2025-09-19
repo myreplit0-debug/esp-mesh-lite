@@ -21,10 +21,16 @@
 
 #include "esp_mesh_lite.h"
 #include "uart_bridge.h"
-#include "sdkconfig.h"   // pull in CONFIG_* if present
+#include "sdkconfig.h"   // Kconfig symbols if present
 
 #ifndef CONFIG_MESH_CHANNEL
-#define CONFIG_MESH_CHANNEL 6   // safe default if Kconfig doesn't define it
+#define CONFIG_MESH_CHANNEL 6
+#endif
+#ifndef CONFIG_BRIDGE_SOFTAP_SSID
+#define CONFIG_BRIDGE_SOFTAP_SSID     "meshmesh"
+#endif
+#ifndef CONFIG_BRIDGE_SOFTAP_PASSWORD
+#define CONFIG_BRIDGE_SOFTAP_PASSWORD "12345678"
 #endif
 
 #define UDP_PORT    3333
@@ -32,7 +38,7 @@
 
 static const char *TAG = "mesh_root";
 
-/* ---------------- NVS ---------------- */
+/* ---------- NVS ---------- */
 static esp_err_t esp_storage_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -43,17 +49,12 @@ static esp_err_t esp_storage_init(void)
     return ret;
 }
 
-/* ---------------- UDP listener ---------------- */
+/* ---------- UDP -> UART ---------- */
 static void udp_rx_task(void *arg)
 {
     (void)arg;
-
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "socket() failed");
-        vTaskDelete(NULL);
-        return;
-    }
+    if (sock < 0) { ESP_LOGE(TAG, "socket() failed"); vTaskDelete(NULL); return; }
 
     int yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -70,16 +71,14 @@ static void udp_rx_task(void *arg)
         return;
     }
 
-    ESP_LOGI(TAG, "Listening UDP :%d (mesh) and forwarding to UART...", UDP_PORT);
+    ESP_LOGI(TAG, "UDP :%d listening; forwarding to UART...", UDP_PORT);
 
     uint8_t buf[512];
     for (;;) {
         struct sockaddr_in from = {0};
         socklen_t fromlen = sizeof(from);
-
         int r = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fromlen);
         if (r > 0) {
-            // Forward exactly what we got
             uart_bridge_write(buf, (size_t)r);
         } else {
             vTaskDelay(pdMS_TO_TICKS(5));
@@ -87,7 +86,7 @@ static void udp_rx_task(void *arg)
     }
 }
 
-/* ---------------- periodic log (optional) ---------------- */
+/* ---------- Optional heartbeat ---------- */
 static void print_system_info_timercb(TimerHandle_t tmr)
 {
     (void)tmr;
@@ -98,7 +97,7 @@ static void print_system_info_timercb(TimerHandle_t tmr)
              (unsigned)esp_get_free_heap_size());
 }
 
-/* ---------------- app_main ---------------- */
+/* ---------- app_main ---------- */
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -107,16 +106,20 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Mesh-Lite setup (root)
+    // Mesh-Lite setup (ROOT)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
-    cfg.join_mesh_without_configured_wifi = false; // root behaves like the example root
+    cfg.join_mesh_without_configured_wifi = true;   // <-- allow join even if STA creds are empty
+
     esp_mesh_lite_init(&cfg);
     esp_mesh_lite_set_allowed_level(1);
     esp_mesh_lite_start();
 
-    // Bring up UART1 on TX=17, RX=16
-    uart_bridge_init();  // this should call uart_set_pin(UART_NUM_1, 17, 16, ...)
+    // Make sure SoftAP is defined so children can find us
+    esp_mesh_lite_set_softap_info(CONFIG_BRIDGE_SOFTAP_SSID, CONFIG_BRIDGE_SOFTAP_PASSWORD);
+
+    // UART1 on TX=17, RX=16 for the DevKit
+    uart_bridge_init();  // should configure UART_NUM_1, tx=17, rx=16
 
     // Start UDP receiver -> UART forwarder
     xTaskCreate(udp_rx_task, "udp_rx", 4096, NULL, 5, NULL);
@@ -126,6 +129,6 @@ void app_main(void)
                                    print_system_info_timercb);
     xTimerStart(t, 0);
 
-    ESP_LOGI(TAG, "Root ready. Mesh channel=%d, UDP=%d, UART TX=17 RX=16",
+    ESP_LOGI(TAG, "Root ready. mesh_ch=%d UDP=%d UART TX=17 RX=16",
              CONFIG_MESH_CHANNEL, UDP_PORT);
 }
