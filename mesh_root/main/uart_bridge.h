@@ -1,10 +1,12 @@
 #pragma once
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void uart_bridge_init(void);
-void uart_bridge_send_line(const char *s);
+/* write raw bytes (no newline added) */
+void uart_bridge_write(const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }
