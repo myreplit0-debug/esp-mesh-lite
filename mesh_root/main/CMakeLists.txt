@@ -3,7 +3,6 @@ idf_component_register(
     "no_router.c"
     "root_udp.c"
     "uart_bridge.c"
-    "ui_display.c"
   INCLUDE_DIRS "."
   REQUIRES
     esp_wifi
