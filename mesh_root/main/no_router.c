@@ -1,31 +1,31 @@
-// no_router.c (root: UDP -> UART, no UI)
-#include <stdio.h>
+// Root: receive UDP :3333 from leaves -> forward to UART (TX=17)
 #include <string.h>
-#include <inttypes.h>
+#include <sys/socket.h>
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "freertos/timers.h"
 
-#include "esp_log.h"
-#include "esp_err.h"
 #include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_system.h"
-#include "nvs_flash.h"
+#include "esp_log.h"
 #include "esp_mac.h"
-#include "lwip/inet.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
 
 #include "esp_mesh_lite.h"
-#include "root_udp.h"
 #include "uart_bridge.h"
 
-#ifndef FORCE_ROOT
+#define UDP_PORT 3333
 #define FORCE_ROOT 1
-#endif
 
-static const char *TAG = "no_router";
+static const char *TAG = "mesh_root";
 
+/* ---------------- NVS ---------------- */
 static esp_err_t esp_storage_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -36,68 +36,86 @@ static esp_err_t esp_storage_init(void)
     return ret;
 }
 
-static void app_wifi_set_softap_info(void)
+/* ---------------- UDP listener ---------------- */
+static void udp_rx_task(void *arg)
 {
-    char ssid[33], psw[64];
-    uint8_t mac[6];
-    esp_err_t er = esp_wifi_get_mac(WIFI_IF_AP, mac);
-    if (er != ESP_OK) { ESP_LOGW(TAG, "AP MAC not ready: %s", esp_err_to_name(er)); return; }
+    (void)arg;
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
 
-#ifdef CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC
-    snprintf(ssid, sizeof(ssid), "%.25s_%02x%02x%02x",
-             CONFIG_BRIDGE_SOFTAP_SSID, mac[3], mac[4], mac[5]);
-#else
-    snprintf(ssid, sizeof(ssid), "%.32s", CONFIG_BRIDGE_SOFTAP_SSID);
-#endif
-    strlcpy(psw, CONFIG_BRIDGE_SOFTAP_PASSWORD, sizeof(psw));
-    esp_mesh_lite_set_softap_info(ssid, psw);
+    int yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in local = {0};
+    local.sin_family      = AF_INET;
+    local.sin_port        = htons(UDP_PORT);
+    local.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(sock, (struct sockaddr *)&local, sizeof(local)) < 0) {
+        ESP_LOGE(TAG, "bind() failed");
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Listening UDP :%d and forwarding to UART…", UDP_PORT);
+
+    uint8_t buf[512];
+    for (;;) {
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+        int r = recvfrom(sock, buf, sizeof(buf), 0,
+                         (struct sockaddr *)&from, &fromlen);
+        if (r > 0) {
+            ESP_LOGI(TAG, "RX %dB from %s", r, inet_ntoa(from.sin_addr));
+            uart_bridge_write(buf, (size_t)r);
+            // Optional: append \n if your DevKit expects line breaks
+            // const char nl = '\n'; uart_bridge_write((const uint8_t*)&nl, 1);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+    }
 }
 
-static void sysinfo_cb(TimerHandle_t xTimer)
+/* ---------------- periodic log (optional) ---------------- */
+static void print_system_info_timercb(TimerHandle_t x)
 {
-    (void)xTimer;
-    uint8_t ch=0; wifi_second_chan_t sc=0; uint8_t sta_mac[6]={0}; wifi_ap_record_t ap={0};
-    esp_wifi_get_channel(&ch, &sc);
-    esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
-    if (esp_mesh_lite_get_level() > 1) (void)esp_wifi_sta_get_ap_info(&ap);
-
-    ESP_LOGI(TAG, "Ch%u Lvl%d self " MACSTR " parent " MACSTR " rssi %d heap %" PRIu32,
-             (unsigned)ch,
-             (int)esp_mesh_lite_get_level(),
-             MAC2STR(sta_mac), MAC2STR(ap.bssid),
-             (ap.rssi != 0 ? ap.rssi : -120),
-             (uint32_t)esp_get_free_heap_size());
+    (void)x;
+    uint8_t ch=0; wifi_second_chan_t sc=0; esp_wifi_get_channel(&ch,&sc);
+    uint8_t mac[6]={0}; esp_wifi_get_mac(ESP_IF_WIFI_STA, mac);
+    ESP_LOGI(TAG, "Ch%u Level %d Self " MACSTR " Heap %u",
+             ch, esp_mesh_lite_get_level(), MAC2STR(mac), (unsigned)esp_get_free_heap_size());
 }
 
+/* ---------------- app_main ---------------- */
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
+
     ESP_ERROR_CHECK(esp_storage_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    // Mesh-Lite setup (root)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
-#if FORCE_ROOT
-    cfg.join_mesh_without_configured_wifi = false;
-    esp_mesh_lite_set_allowed_level(1);
-    ESP_LOGI(TAG, "ROOT mode");
-#else
-    cfg.join_mesh_without_configured_wifi = true;
-    esp_mesh_lite_set_disallowed_level(1);
-    ESP_LOGI(TAG, "CHILD mode");
-#endif
-
+    cfg.join_mesh_without_configured_wifi = false; // root should have its own config
     esp_mesh_lite_init(&cfg);
+    esp_mesh_lite_set_allowed_level(1);
     esp_mesh_lite_start();
 
-    // set SoftAP label (non-fatal if too early)
-    app_wifi_set_softap_info();
-
-    // UART bridge + UDP listener
+    // UART for DevKit link
     uart_bridge_init();
-    (void)root_udp_start(3333);
 
-    TimerHandle_t t = xTimerCreate("sysinfo", 10000/portTICK_PERIOD_MS, pdTRUE, NULL, sysinfo_cb);
+    // UDP listener
+    xTaskCreate(udp_rx_task, "udp_rx", 4096, NULL, 5, NULL);
+
+    // Optional system info timer
+    TimerHandle_t t = xTimerCreate("sysinfo", 10000/portTICK_PERIOD_MS, pdTRUE, NULL,
+                                   print_system_info_timercb);
     xTimerStart(t, 0);
 }
