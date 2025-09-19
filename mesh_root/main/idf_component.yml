@@ -1,4 +1,3 @@
 dependencies:
   idf: ">=5.0"
-  mesh_lite:
-    version: "*"
+  espressif/mesh_lite: "*"
