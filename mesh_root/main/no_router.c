@@ -270,31 +270,7 @@ static esp_err_t events_get_handler(httpd_req_t *req)
     g_clients = c;
     taskEXIT_CRITICAL(&sse_lock);
 
-    // keep the connection open
     while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    // unreachable
-    // return ESP_OK;
-}
-
-static httpd_handle_t start_httpd(void)
-{
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.lru_purge_enable = true;
-    cfg.server_port = 80; // on AP interface (192.168.5.1)
-
-    httpd_handle_t hd = NULL;
-    if (httpd_start(&hd, &cfg) != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_start failed");
-        return NULL;
-    }
-    httpd_uri_t root =    { .uri="/",        .method=HTTP_GET, .handler=root_get_handler    };
-    httpd_uri_t history = { .uri="/history", .method=HTTP_GET, .handler=history_get_handler };
-    httpd_uri_t events =  { .uri="/events",  .method=HTTP_GET, .handler=events_get_handler  };
-    httpd_register_uri_handler(hd, &root);
-    httpd_register_uri_handler(hd, &history);
-    httpd_register_uri_handler(hd, &events);
-    ESP_LOGI(TAG, "HTTP server ready at http://192.168.5.1/");
-    return hd;
 }
 
 /* --------------------------- app_main --------------------------- */
@@ -309,14 +285,25 @@ void app_main(void)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = false;      // root role
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+
+    // ---- replace ESP_ERROR_CHECK with explicit checks ----
+    esp_err_t __rc = esp_mesh_lite_init(&cfg);
+    if (__rc != ESP_OK) {
+        ESP_LOGE(TAG, "esp_mesh_lite_init failed: %s", esp_err_to_name(__rc));
+        return;
+    }
 
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);                 // force root
 
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    __rc = esp_mesh_lite_start();
+    if (__rc != ESP_OK) {
+        ESP_LOGE(TAG, "esp_mesh_lite_start failed: %s", esp_err_to_name(__rc));
+        return;
+    }
+    // ------------------------------------------------------
 
     start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
