@@ -1,8 +1,4 @@
-/* mesh_root/main/no_router.c — Root with UART mirror (matches your API)
- *
- * Mirrors any Mesh-Lite JSON whose {"type":"<ACTION_TYPE>"} matches
- * to UART1 TX=17 (via uart_bridge.c).
- */
+/* mesh_root/main/no_router.c — Root with UART mirror (final) */
 
 #include <stdio.h>
 #include <string.h>
@@ -21,13 +17,13 @@
 
 static const char *TAG = "mesh_root";
 
-/* Change this to whatever 'type' your leaves already send */
+/* Change to whatever 'type' your leaves already send */
 #define ACTION_TYPE "uart_forward"
 
 /* ---- Action callback: mirror payload JSON to UART as one line ---- */
 static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
 {
-    // If you only want a subfield (e.g. "data"), uncomment this block:
+    // If you only want a specific field, use the commented block below.
     /*
     cJSON *d = cJSON_GetObjectItemCaseSensitive(payload, "data");
     if (cJSON_IsString(d) && d->valuestring) {
@@ -39,7 +35,6 @@ static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
     }
     */
 
-    // Default: forward the entire JSON compactly
     char *raw = cJSON_PrintUnformatted(payload);
     if (raw) {
         uart_bridge_write((const uint8_t *)raw, strlen(raw));
@@ -54,8 +49,8 @@ static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
 /* ---- Register the action list (name -> callback) ---- */
 static const esp_mesh_lite_msg_action_t g_actions[] = {
     {
-        .type     = ACTION_TYPE,   // must match the leaf JSON "type"
-        .rsp_type = NULL,          // no reply
+        .type     = ACTION_TYPE,
+        .rsp_type = NULL,
         .process  = on_action_forward
     },
 };
@@ -67,17 +62,17 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Bring up UART1 (TX pin set via Kconfig/sdkconfig.defaults)
+    // UART1 (TX pin via Kconfig/sdkconfig.defaults; default TX=17)
     uart_bridge_init();
 
-    // Mesh-Lite bring-up — in your version init expects a config*
+    // Mesh-Lite bring-up (these are void in your version)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));   // <— important: pass &cfg
+    esp_mesh_lite_init(&cfg);                   // <-- no ESP_ERROR_CHECK
 
-    // Register actions BEFORE start
+    // Register actions BEFORE start (also void)
     esp_mesh_lite_msg_action_list_register(g_actions);
 
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    esp_mesh_lite_start();                      // <-- no ESP_ERROR_CHECK
 
     ESP_LOGI(TAG, "Root up. Forwarding JSON where type=\"%s\" to UART TX=%d @%d",
              ACTION_TYPE, CONFIG_UART_BRIDGE_TX_PIN, CONFIG_UART_BRIDGE_BAUD);
