@@ -10,5 +10,6 @@ idf_component_register(
         nvs_flash
         driver
         esp_timer
-        mesh_lite       # <-- use correct registry name
+        mesh_lite
+        json
 )
