@@ -1,6 +1,3 @@
 dependencies:
   idf: ">=5.0"
-  mesh_lite:
-    version: "*"
-    # Please comment the following line, if this example is installed by idf.py create-project-from-example.
-    override_path: "../../../components/mesh_lite"
+  espressif/esp-mesh-lite: "^1.0.2"
