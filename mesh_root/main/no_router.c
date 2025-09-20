@@ -1,73 +1,76 @@
-// mesh_root/main/no_router.c  (v1.0-friendly, action-based UART mirror)
+// mesh_root/main/no_router.c
+//
+// Root: receive UDP :3333 from leaves -> forward to UART (TX=17)
+// No mesh callbacks, no JSON actions, just a UDP socket + UART bridge.
 
-#include <stdio.h>
 #include <string.h>
-#include "esp_err.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_wifi.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
-
-#include "esp_mesh_lite.h"
 #include "uart_bridge.h"
-#include "cJSON.h"
 
+#define UDP_PORT 3333
 static const char *TAG = "mesh_root";
 
-// Change this to the action your leaves already send.
-// e.g. "ble_report", "data", "uart_forward", etc.
-#define ACTION_TYPE "uart_forward"
-
-/* Action handler: mirror payload JSON to UART as one line */
-static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
+static void udp_task(void *pvParameters)
 {
-    // Forward the whole JSON payload, compact, + newline
-    char *raw = cJSON_PrintUnformatted(payload);
-    if (raw) {
-        uart_bridge_write((const uint8_t *)raw, strlen(raw));
-        const char nl = '\n';
-        uart_bridge_write((const uint8_t *)&nl, 1);
-        cJSON_free(raw);
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
     }
-    ESP_LOGD(TAG, "mirrored action '%s' seq=%u", ACTION_TYPE, (unsigned)seq);
-    return NULL; // no response JSON
-}
 
-/* Register exactly one action: name -> callback */
-static const esp_mesh_lite_msg_action_t g_actions[] = {
-    {
-        .type     = ACTION_TYPE,   // must match leaf JSON "type"
-        .rsp_type = NULL,          // no reply
-        .process  = on_action_forward
-    },
-};
+    struct sockaddr_in dest_addr;
+    dest_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(UDP_PORT);
+
+    if (bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) < 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Listening on UDP port %d", UDP_PORT);
+
+    uint8_t rxbuf[256];
+    while (1) {
+        int len = recvfrom(sock, rxbuf, sizeof(rxbuf)-1, 0, NULL, 0);
+        if (len > 0) {
+            uart_bridge_write(rxbuf, len);
+            const char nl = '\n';
+            uart_bridge_write((const uint8_t *)&nl, 1);
+            ESP_LOGI(TAG, "UDP->UART: %d bytes", len);
+        }
+    }
+
+    close(sock);
+    vTaskDelete(NULL);
+}
 
 void app_main(void)
 {
-    // Standard IDF bring-up
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Our UART bridge (pins/baud from sdkconfig/Kconfig)
     uart_bridge_init();
 
-    // Mesh-Lite init using the v1.0 helper
-    esp_mesh_lite_config_t *cfg = esp_mesh_lite_get_ap_config();
-    ESP_ERROR_CHECK(esp_mesh_lite_init(cfg));
+    xTaskCreate(udp_task, "udp_task", 4096, NULL, 5, NULL);
 
-    // IMPORTANT: register actions before start (v1.0 API)
-    esp_mesh_lite_msg_action_list_register(g_actions);
-
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
-
-    ESP_LOGI(TAG, "Root ready. Mirroring action type \"%s\" to UART%d TX=%d @%d",
-             ACTION_TYPE, CONFIG_UART_BRIDGE_PORT,
+    ESP_LOGI(TAG, "Root up. Mirroring UDP:%d to UART%d TX=%d @%d",
+             UDP_PORT, CONFIG_UART_BRIDGE_PORT,
              CONFIG_UART_BRIDGE_TX_PIN, CONFIG_UART_BRIDGE_BAUD);
-
-    // Idle loop
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
 }
