@@ -9,6 +9,6 @@ idf_component_register(
         lwip
         esp_timer
         esp_http_server
-        mesh_lite
+        esp_mesh_lite
         json
 )
