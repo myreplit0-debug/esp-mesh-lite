@@ -1,9 +1,5 @@
-# mesh_root/main/idf_component.yml
 version: "0.1.0"
-
 dependencies:
   idf: ">=5.1"
-
-# Use LOCAL copy only for mesh_lite
-espresif/esp-mesh-lite:
-  override_path: ../components/mesh_lite
+  espresif/esp-mesh-lite:
+    override_path: ../components/mesh_lite
