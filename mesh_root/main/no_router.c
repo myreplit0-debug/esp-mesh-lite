@@ -103,8 +103,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* Init Mesh Lite (old API: no args) */
-    ESP_ERROR_CHECK(esp_mesh_lite_init());
+    /* Init Mesh Lite (this version REQUIRES a config) */
+    esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
+    cfg.join_mesh_ignore_router_status = true;
+    cfg.join_mesh_without_configured_wifi = true;
+
+    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
     esp_mesh_lite_set_allowed_level(1);  // always root
     ESP_ERROR_CHECK(esp_mesh_lite_start());
 
