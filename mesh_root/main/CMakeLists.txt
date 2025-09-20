@@ -10,6 +10,5 @@ idf_component_register(
         esp_timer
         esp_http_server
         mesh_lite
-        esp_bridge
         json
 )
