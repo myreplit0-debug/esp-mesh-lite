@@ -42,6 +42,9 @@ static char rbuf[RBUF_LINES][LINE_MAX];
 static size_t rhead = 0, rcount = 0;
 static portMUX_TYPE rlock = portMUX_INITIALIZER_UNLOCKED;
 
+/* forward decls */
+static void sse_broadcast(const char *msg);
+
 static inline void rbuf_push(const char *s) {
     taskENTER_CRITICAL(&rlock);
     strlcpy(rbuf[rhead], s, LINE_MAX);
@@ -95,7 +98,7 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-    wifi_config_t sta_cfg = { 0 };
+    wifi_config_t sta_cfg = (wifi_config_t){ 0 };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
     wifi_config_t ap_cfg = {
@@ -115,21 +118,6 @@ static void wifi_init(void)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_start());
-}
-
-static void app_wifi_set_softap_info(void)
-{
-    char ssid[33] = {0};
-    char psw[64]  = {0};
-    size_t ssid_sz = sizeof(ssid), psw_sz = sizeof(psw);
-
-    if (esp_mesh_lite_get_softap_ssid_from_nvs(ssid, &ssid_sz) != ESP_OK) {
-        strlcpy(ssid, CONFIG_BRIDGE_SOFTAP_SSID, sizeof(ssid));
-    }
-    if (esp_mesh_lite_get_softap_psw_from_nvs(psw, &psw_sz) != ESP_OK) {
-        strlcpy(psw, CONFIG_BRIDGE_SOFTAP_PASSWORD, sizeof(psw));
-    }
-    esp_mesh_lite_set_softap_info(ssid, psw);
 }
 
 /* -------- UDP listener task -------- */
@@ -165,8 +153,7 @@ static void udp_listener_task(void *arg)
             buf[n] = 0;
             ESP_LOGI(TAG, "RX %dB from %s: %s", n, inet_ntoa(from.sin_addr), buf);
             rbuf_push(buf);
-            extern void sse_broadcast(const char *msg);
-            sse_broadcast(buf);
+            sse_broadcast(buf);   // no extern; real static function below
         }
     }
 }
@@ -300,14 +287,17 @@ void app_main(void)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = false;      // ROOT
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+
+    /* Some Mesh-Lite headers declare these as void in this version.
+       Call them without ESP_ERROR_CHECK to avoid 'void value not ignored'. */
+    (void)esp_mesh_lite_init(&cfg);
 
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);                 // force root
 
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    (void)esp_mesh_lite_start();
 
     start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
