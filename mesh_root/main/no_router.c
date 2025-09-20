@@ -28,18 +28,16 @@
 /* ---- UDP port (leafs send here) ---- */
 #define UDP_PORT      3333
 
-/* ---------- storage init ---------- */
 static esp_err_t esp_storage_init(void)
 {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_flash_erase();
         ret = nvs_flash_init();
     }
     return ret;
 }
 
-/* ---------- UART init ---------- */
 static void root_uart_init(void)
 {
     const uart_config_t cfg = {
@@ -50,15 +48,14 @@ static void root_uart_init(void)
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, 0, UART_TXBUF_SZ, 0, NULL, 0));
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    uart_driver_install(UART_PORT, 0, UART_TXBUF_SZ, 0, NULL, 0);
+    uart_param_config(UART_PORT, &cfg);
+    uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN,
+                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
 
     ESP_LOGI(TAG, "UART ready @%d (TX=%d)", UART_BAUD, UART_TX_PIN);
 }
 
-/* ---------- UDP -> UART forwarder ---------- */
 static void root_udp_forward_task(void *arg)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -94,23 +91,22 @@ static void root_udp_forward_task(void *arg)
     }
 }
 
-/* --------------------------- app_main --------------------------- */
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
     esp_storage_init();
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_init();
+    esp_event_loop_create_default();
 
-    /* Init Mesh Lite (this version REQUIRES a config) */
+    // Mesh-Lite requires a config and returns void in this repo
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = true;
 
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
-    esp_mesh_lite_set_allowed_level(1);  // always root
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    esp_mesh_lite_init(&cfg);          // <-- NO ESP_ERROR_CHECK (returns void)
+    esp_mesh_lite_set_allowed_level(1); // force this device to be root
+    esp_mesh_lite_start();              // <-- NO ESP_ERROR_CHECK (returns void)
 
     root_uart_init();
     xTaskCreate(root_udp_forward_task, "root_udp_fwd", 4096, NULL, 5, NULL);
