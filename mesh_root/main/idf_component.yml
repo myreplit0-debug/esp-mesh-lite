@@ -1,5 +1,5 @@
 version: "0.1.0"
 dependencies:
-  idf: ">=5.1"
-  espresif/esp-mesh-lite:
+  idf: "~5.1"           # <-- was ">=5.1"; pin to the 5.1 family
+  espressif/esp-mesh-lite:
     override_path: ../components/mesh_lite
