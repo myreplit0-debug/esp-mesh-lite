@@ -26,8 +26,8 @@
 
 #include "esp_wifi.h"
 #include "esp_event.h"
+#include "esp_netif.h"
 #include "esp_mesh_lite.h"
-#include "esp_bridge.h"
 
 #include "esp_http_server.h"
 
@@ -50,47 +50,19 @@ static inline void rbuf_push(const char *s) {
     taskEXIT_CRITICAL(&rlock);
 }
 
-/* broadcast queue to HTTP SSE clients */
-typedef struct sse_client_s {
-    httpd_handle_t hd;
-    int fd;
-    struct sse_client_s *next;
-} sse_client_t;
-
-static sse_client_t *g_clients = NULL;
-static portMUX_TYPE sse_lock = portMUX_INITIALIZER_UNLOCKED;
-
-static void sse_broadcast(const char *msg) {
-    taskENTER_CRITICAL(&sse_lock);
-    sse_client_t **pp = &g_clients;
-    while (*pp) {
-        sse_client_t *c = *pp;
-        char buf[LINE_MAX + 16];
-        int n = snprintf(buf, sizeof(buf), "data: %s\n\n", msg);
-        if (httpd_socket_send(c->hd, c->fd, buf, n, 0) < 0) {
-            // drop dead client
-            *pp = c->next;
-            free(c);
-            continue;
-        }
-        pp = &(*pp)->next;
-    }
-    taskEXIT_CRITICAL(&sse_lock);
-}
-
 /* -------- mesh info print (stock example style) -------- */
 static void print_system_info_timercb(TimerHandle_t xTimer)
 {
     uint8_t primary = 0;
-    wifi_ap_record_t ap_info = {0};
+    wifi_ap_record_t ap_info = (wifi_ap_record_t){0};
     wifi_second_chan_t second = 0;
     uint8_t sta_mac[6] = {0};
 
     if (esp_mesh_lite_get_level() > 1) {
-        esp_wifi_sta_get_ap_info(&ap_info);
+        (void)esp_wifi_sta_get_ap_info(&ap_info);
     }
-    esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
-    esp_wifi_get_channel(&primary, &second);
+    (void)esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
+    (void)esp_wifi_get_channel(&primary, &second);
 
     ESP_LOGI(TAG, "System info: channel:%d layer:%d self:"MACSTR
                   " parent:"MACSTR" rssi:%d heap:%"PRIu32,
@@ -99,7 +71,7 @@ static void print_system_info_timercb(TimerHandle_t xTimer)
              (ap_info.rssi != 0 ? ap_info.rssi : -120), esp_get_free_heap_size());
 }
 
-/* -------- storage & Wi-Fi config (same pattern as example) -------- */
+/* -------- storage & Wi-Fi config (no esp_bridge) -------- */
 static esp_err_t esp_storage_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -112,11 +84,20 @@ static esp_err_t esp_storage_init(void)
 
 static void wifi_init(void)
 {
-    // Station side (left default)
-    wifi_config_t sta_cfg = { 0 };
-    esp_bridge_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+    // Init TCP/IP + default event loop are done in app_main()
+    // Create default netifs
+    esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
 
-    // SoftAP for phone/ESP32 viewer; SSID/PW & mesh channel are taken from sdkconfig.defaults
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+
+    // Station config (left mostly empty for Mesh-Lite root; it ignores router status)
+    wifi_config_t sta_cfg = { 0 };
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
+
+    // SoftAP for phone/ESP32 viewer; SSID/PW & mesh channel come from sdkconfig.defaults
     wifi_config_t ap_cfg = {
         .ap = {
             .ssid = CONFIG_BRIDGE_SOFTAP_SSID,
@@ -130,7 +111,10 @@ static void wifi_init(void)
     if (strlen(CONFIG_BRIDGE_SOFTAP_PASSWORD) == 0) {
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
-    esp_bridge_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
+
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+    ESP_ERROR_CHECK(esp_wifi_start());
 }
 
 static void app_wifi_set_softap_info(void)
@@ -181,12 +165,41 @@ static void udp_listener_task(void *arg)
             buf[n] = 0;
             ESP_LOGI(TAG, "RX %dB from %s: %s", n, inet_ntoa(from.sin_addr), buf);
             rbuf_push(buf);
+            // (optional) broadcast to SSE clients; implemented below
+            extern void sse_broadcast(const char *msg);
             sse_broadcast(buf);
         }
     }
 }
 
-/* --------- HTTP server (index + SSE /events) ---------- */
+/* --------- SSE + HTTP server ---------- */
+
+typedef struct sse_client_s {
+    httpd_handle_t hd;
+    int fd;
+    struct sse_client_s *next;
+} sse_client_t;
+
+static sse_client_t *g_clients = NULL;
+static portMUX_TYPE sse_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void sse_broadcast(const char *msg) {
+    taskENTER_CRITICAL(&sse_lock);
+    sse_client_t **pp = &g_clients;
+    while (*pp) {
+        sse_client_t *c = *pp;
+        char out[LINE_MAX + 16];
+        int n = snprintf(out, sizeof(out), "data: %s\n\n", msg);
+        if (httpd_socket_send(c->hd, c->fd, out, n, 0) < 0) {
+            *pp = c->next;
+            free(c);
+            continue;
+        }
+        pp = &(*pp)->next;
+    }
+    taskEXIT_CRITICAL(&sse_lock);
+}
+
 static const char *INDEX_HTML =
 "<!doctype html><html><head><meta charset=utf-8>"
 "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -214,13 +227,11 @@ static esp_err_t history_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr_chunk(req, "[");
-    // dump newest -> oldest
     taskENTER_CRITICAL(&rlock);
     size_t n = rcount;
     for (size_t i=0;i<n;i++) {
         size_t idx = (rhead + RBUF_LINES - 1 - i) % RBUF_LINES;
         char esc[LINE_MAX*2];
-        // naive JSON escaping for quotes/backslashes
         int p=0;
         for (const char *s=rbuf[idx]; *s && p<(int)sizeof(esc)-2; ++s) {
             if (*s=='\\' || *s=='\"') { esc[p++]='\\'; esc[p++]=*s; }
@@ -253,7 +264,6 @@ static esp_err_t events_get_handler(httpd_req_t *req)
     g_clients = c;
     taskEXIT_CRITICAL(&sse_lock);
 
-    // keep open “forever”: httpd will close when client disconnects
     while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     return ESP_OK;
 }
@@ -286,7 +296,6 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    esp_bridge_create_all_netif();
     wifi_init();
 
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
@@ -301,11 +310,9 @@ void app_main(void)
 
     ESP_ERROR_CHECK(esp_mesh_lite_start());
 
-    // HTTP + UDP
     start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
 
-    // periodic info
     TimerHandle_t t = xTimerCreate("print_system_info",
                                    10000 / portTICK_PERIOD_MS, pdTRUE, NULL,
                                    print_system_info_timercb);
