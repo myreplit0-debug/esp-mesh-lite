@@ -1,4 +1,4 @@
+version: "1.0.0"
+
 dependencies:
-  espressif/esp-mesh-lite:
-    version: "^1.0.2"
-    override_path: ../components/esp_mesh_lite
+  espressif/esp-mesh-lite: "^1.0.2"
