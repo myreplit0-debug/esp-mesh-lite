@@ -50,9 +50,6 @@ static inline void rbuf_push(const char *s) {
     taskEXIT_CRITICAL(&rlock);
 }
 
-/* forward decl so we can call it from udp_listener_task */
-static void sse_broadcast(const char *msg);
-
 /* -------- mesh info print (stock example style) -------- */
 static void print_system_info_timercb(TimerHandle_t xTimer)
 {
@@ -67,11 +64,15 @@ static void print_system_info_timercb(TimerHandle_t xTimer)
     (void)esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
     (void)esp_wifi_get_channel(&primary, &second);
 
-    ESP_LOGI(TAG, "System info: channel:%d layer:%d self:"MACSTR
-                  " parent:"MACSTR" rssi:%d heap:%"PRIu32,
-             primary, esp_mesh_lite_get_level(),
-             MAC2STR(sta_mac), MAC2STR(ap_info.bssid),
-             (ap_info.rssi != 0 ? ap_info.rssi : -120), esp_get_free_heap_size());
+    ESP_LOGI(TAG,
+             "System info: channel:%u layer:%d self:" MACSTR
+             " parent:" MACSTR " rssi:%d heap:%u",
+             (unsigned)primary,
+             esp_mesh_lite_get_level(),
+             MAC2STR(sta_mac),
+             MAC2STR(ap_info.bssid),
+             (ap_info.rssi != 0 ? ap_info.rssi : -120),
+             (unsigned)esp_get_free_heap_size());
 }
 
 /* -------- storage & Wi-Fi config (no esp_bridge) -------- */
@@ -87,8 +88,6 @@ static esp_err_t esp_storage_init(void)
 
 static void wifi_init(void)
 {
-    // Init TCP/IP + default event loop are done in app_main()
-    // Create default netifs
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
@@ -96,11 +95,9 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
-    // Station config (left mostly empty for Mesh-Lite root; it ignores router status)
     wifi_config_t sta_cfg = { 0 };
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
 
-    // SoftAP for phone/ESP32 viewer; SSID/PW & mesh channel come from sdkconfig.defaults
     wifi_config_t ap_cfg = {
         .ap = {
             .ssid = CONFIG_BRIDGE_SOFTAP_SSID,
@@ -168,7 +165,7 @@ static void udp_listener_task(void *arg)
             buf[n] = 0;
             ESP_LOGI(TAG, "RX %dB from %s: %s", n, inet_ntoa(from.sin_addr), buf);
             rbuf_push(buf);
-            // broadcast to SSE clients
+            extern void sse_broadcast(const char *msg);
             sse_broadcast(buf);
         }
     }
@@ -303,16 +300,14 @@ void app_main(void)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = false;      // ROOT
-    /* returns void in esp-mesh-lite v1.x */
-    esp_mesh_lite_init(&cfg);
+    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
 
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);                 // force root
 
-    /* returns void in esp-mesh-lite v1.x */
-    esp_mesh_lite_start();
+    ESP_ERROR_CHECK(esp_mesh_lite_start());
 
     start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
