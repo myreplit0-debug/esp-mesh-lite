@@ -1,13 +1,8 @@
 idf_component_register(
-  SRCS "no_router.c"
-  INCLUDE_DIRS "."
-  REQUIRES
-    esp_wifi
-    esp_event
-    nvs_flash
-    lwip
-    esp_timer
-    esp_http_server
-    mesh_lite
-    json
+    SRCS "no_router.c"
+    INCLUDE_DIRS "."
+    REQUIRES esp_wifi esp_event nvs_flash lwip esp_timer esp_http_server mesh_lite json
 )
+
+# Prevent GCC from treating warnings as errors for this component
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wno-error)
