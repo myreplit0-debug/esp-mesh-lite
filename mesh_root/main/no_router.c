@@ -1,4 +1,8 @@
-/* mesh_root/main/no_router.c — Root with UART mirror (final) */
+/* mesh_root/main/no_router.c — Root with UART mirror (NULL-terminated list + bridge netifs)
+ *
+ * Mirrors any Mesh-Lite JSON whose {"type":"<ACTION_TYPE>"} matches
+ * to UART1 TX=17 (via uart_bridge.c). Mesh SSID/password/channel are unchanged.
+ */
 
 #include <stdio.h>
 #include <string.h>
@@ -13,17 +17,18 @@
 
 #include "cJSON.h"
 #include "esp_mesh_lite.h"
+#include "esp_bridge.h"      // for esp_bridge_create_all_netif()
 #include "uart_bridge.h"
 
 static const char *TAG = "mesh_root";
 
-/* Change to whatever 'type' your leaves already send */
+/* Change to the 'type' your leaves already send */
 #define ACTION_TYPE "uart_forward"
 
 /* ---- Action callback: mirror payload JSON to UART as one line ---- */
 static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
 {
-    // If you only want a specific field, use the commented block below.
+    // If you only want a specific field, use the block below:
     /*
     cJSON *d = cJSON_GetObjectItemCaseSensitive(payload, "data");
     if (cJSON_IsString(d) && d->valuestring) {
@@ -46,13 +51,18 @@ static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
     return NULL; // no response JSON
 }
 
-/* ---- Register the action list (name -> callback) ---- */
+/* ---- Action list MUST be NULL-terminated in this Mesh-Lite version ---- */
 static const esp_mesh_lite_msg_action_t g_actions[] = {
     {
         .type     = ACTION_TYPE,
         .rsp_type = NULL,
         .process  = on_action_forward
     },
+    {   // terminator (required)
+        .type     = NULL,
+        .rsp_type = NULL,
+        .process  = NULL
+    }
 };
 
 void app_main(void)
@@ -65,19 +75,22 @@ void app_main(void)
     // UART1 (TX pin via Kconfig/sdkconfig.defaults; default TX=17)
     uart_bridge_init();
 
-    // Mesh-Lite bring-up (these are void in your version)
+    // Create STA/AP netifs Mesh-Lite expects (matches Espressif examples)
+    esp_bridge_create_all_netif();
+
+    // Mesh-Lite init/start — these are void in your build; don't wrap with ESP_ERROR_CHECK
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
-    esp_mesh_lite_init(&cfg);                   // <-- no ESP_ERROR_CHECK
+    esp_mesh_lite_init(&cfg);
 
     // Register actions BEFORE start (also void)
     esp_mesh_lite_msg_action_list_register(g_actions);
 
-    esp_mesh_lite_start();                      // <-- no ESP_ERROR_CHECK
+    esp_mesh_lite_start();
 
     ESP_LOGI(TAG, "Root up. Forwarding JSON where type=\"%s\" to UART TX=%d @%d",
              ACTION_TYPE, CONFIG_UART_BRIDGE_TX_PIN, CONFIG_UART_BRIDGE_BAUD);
 
-    // Optional heartbeat
+    // Optional heartbeat so you know it's alive
     const int64_t every_us = 3 * 1000 * 1000;
     int64_t next = esp_timer_get_time() + every_us;
     while (1) {
