@@ -5,12 +5,11 @@ idf_component_register(
     REQUIRES
         esp_wifi
         esp_event
-        esp_netif
         nvs_flash
         lwip
         esp_timer
         esp_http_server
         mesh_lite
-        iot_bridge     # <— replace esp_bridge with iot_bridge
+        esp_bridge
         json
 )
