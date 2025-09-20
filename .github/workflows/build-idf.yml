@@ -1,14 +1,14 @@
 name: build-all
 
 on:
-  push:
-  workflow_dispatch:
+  push: {}
+  workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:v5.1.2   # pin IDF to v5.1.2 (works with esp-mesh-lite v1.x)
+      image: espressif/idf:v5.1.2   # IDF 5.1.x works with esp-mesh-lite v1.x
       options: --user 0
 
     strategy:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Make the repo a "safe" git dir inside the container
+      # Make the repo a "safe" git dir inside the container (IDF invokes git)
       - name: Make git workspace safe
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -29,29 +29,32 @@ jobs:
       - name: Build ${{ matrix.app.name }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           source /opt/esp/idf/export.sh
 
           cd "${{ matrix.app.path }}"
 
+          # kill stale lock so CMake resolver doesn't fetch wrong components
+          rm -f dependencies.lock
+
           # Target ESP32-S3
           idf.py set-target esp32s3
 
-          # Full clean build
+          # Full clean + build
           idf.py fullclean
           idf.py build
 
           # Collect artifacts (bootloader / partition table / app), ignore if missing
           mkdir -p "../artifacts/${{ matrix.app.name }}"
-          cp -v build/bootloader/bootloader.bin   "../artifacts/${{ matrix.app.name }}/" || true
+          cp -v build/bootloader/bootloader.bin "../artifacts/${{ matrix.app.name }}/" || true
           cp -v build/partition_table/partition-table.bin "../artifacts/${{ matrix.app.name }}/" || true
 
-          # Copy all .bin in build/ except bootloader & partition
+          # Copy all .bin except bootloader/partition-table
           find build -maxdepth 1 -type f -name "*.bin" \
             ! -name "bootloader*.bin" ! -name "partition-table*.bin" \
             -exec cp -v {} "../artifacts/${{ matrix.app.name }}/" \; || true
 
-          # Optional: keep maps/elfs for debugging
+          # Optional debug outputs
           cp -v build/*.elf "../artifacts/${{ matrix.app.name }}/" || true
           cp -v build/*.map "../artifacts/${{ matrix.app.name }}/" || true
 
