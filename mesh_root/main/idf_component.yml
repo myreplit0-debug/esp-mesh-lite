@@ -4,9 +4,8 @@ version: "0.1.0"
 dependencies:
   idf: ">=5.1"
 
-  # Use LOCAL copies (no registry downloads)
   espressif/esp-mesh-lite:
-    override_path: ../components/esp_mesh_lite
+    override_path: ../../components/esp_mesh_lite   # <-- go up two
 
   espressif/esp-iot-bridge:
-    override_path: ../components/esp_bridge
+    override_path: ../../components/esp_bridge      # <-- go up two
