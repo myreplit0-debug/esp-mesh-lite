@@ -1,99 +1,108 @@
-/* mesh_root/main/no_router.c  — Minimal root + optional UART mirror
+/* mesh_root/main/no_router.c — Root with UDP->UART mirror (matches your leaf)
  *
- * Nothing about SSID/password/channel is changed.
- * Works with ESP-Mesh-Lite v1.0.x (IDF v5).
- *
- * If you want to mirror selected mesh actions to UART, set
- *   #define ENABLE_UART_FORWARD 1
- * and set ACTION_TYPE to match the "type" your leaves already send.
+ * Leaf sends UART bytes as UDP datagrams to port 3333 over Mesh-Lite.
+ * Root listens on UDP :3333 and mirrors each datagram to UART1 TX=17.
+ * Nothing about SSID/password/channel is changed here.
  */
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
-#include "esp_err.h"
-#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
-#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_wifi.h"
-#include "cJSON.h"
 #include "esp_mesh_lite.h"
-
 #include "uart_bridge.h"
 
-#define ENABLE_UART_FORWARD 0           // start MINIMAL (0). set to 1 after it boots cleanly.
-#define ACTION_TYPE         "uart_forward"
-
 static const char *TAG = "mesh_root";
+#define UDP_PORT 3333
+#define RX_BUF   1500
 
-/* ========== OPTIONAL UART forward action ========== */
-#if ENABLE_UART_FORWARD
-/* Mesh-Lite action callback signature for v1.0.x */
-static cJSON *on_action_forward(cJSON *payload, uint32_t seq)
+static void udp_rx_task(void *arg)
 {
-    // Forward the entire JSON as a single line to the UART bridge
-    char *raw = cJSON_PrintUnformatted(payload);
-    if (raw) {
-        uart_bridge_write((const uint8_t *)raw, strlen(raw));
-        const char nl = '\n';
-        uart_bridge_write((const uint8_t *)&nl, 1);
-        cJSON_free(raw);
-    }
-    ESP_LOGD(TAG, "mirrored action '%s' seq=%u", ACTION_TYPE, (unsigned)seq);
-    return NULL; // no response JSON
-}
+    int sock = -1;
 
-/* action table */
-static const esp_mesh_lite_msg_action_t g_actions[] = {
-    {
-        .type     = ACTION_TYPE,   // must match leaf JSON "type"
-        .rsp_type = NULL,          // we don't send a response
-        .process  = on_action_forward,
-    },
-};
-#endif
-/* ================================================== */
+    // Create UDP socket
+    while (sock < 0) {
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+        if (sock < 0) {
+            ESP_LOGW(TAG, "socket() failed, retrying...");
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+    }
+
+    // Bind to :3333 on any interface (Mesh-Lite sets up netifs)
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(UDP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    while (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGW(TAG, "bind(:%d) failed, retrying...", UDP_PORT);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    ESP_LOGI(TAG, "UDP listener bound on :%d", UDP_PORT);
+
+    uint8_t buf[RX_BUF];
+
+    for (;;) {
+        struct sockaddr_in src;
+        socklen_t slen = sizeof(src);
+        int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&src, &slen);
+        if (n > 0) {
+            // Mirror raw bytes to UART1 (TX=CONFIG_UART_BRIDGE_TX_PIN)
+            uart_bridge_write(buf, (size_t)n);
+
+            // Optional: add newline if you want line-oriented output
+            // const char nl = '\n';
+            // uart_bridge_write((const uint8_t *)&nl, 1);
+        } else {
+            // yield a bit on errors or timeouts
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+
+    // (never reached)
+    // close(sock);
+    // vTaskDelete(NULL);
+}
 
 void app_main(void)
 {
-    // --- mandatory IDF bring-up ---
+    // Standard IDF bring-up
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // --- optional: bring up UART bridge early so logging is visible on that port too ---
+    // Bring up UART1 bridge (TX defaults from Kconfig/sdkconfig.defaults)
     uart_bridge_init();
+    ESP_LOGI(TAG, "UART bridge ready (TX=%d RX=%d @%d)",
+             CONFIG_UART_BRIDGE_TX_PIN, CONFIG_UART_BRIDGE_RX_PIN, CONFIG_UART_BRIDGE_BAUD);
 
-    // --- Mesh-Lite bring-up (v1.0.x) ---
-    // NOTE: v1.0.x uses void esp_mesh_lite_init(void) / void esp_mesh_lite_start(void)
+    // Start Mesh-Lite (v1.0.x API is void init/start)
     esp_mesh_lite_init();
-
-#if ENABLE_UART_FORWARD
-    // Register actions BEFORE start (single-argument API in v1.0.x)
-    esp_mesh_lite_msg_action_list_register(g_actions);
-#endif
-
     esp_mesh_lite_start();
+    ESP_LOGI(TAG, "Mesh-Lite started; waiting for UDP %d...", UDP_PORT);
 
-    ESP_LOGI(TAG, "Root up. UART TX=%d RX=%d @%d. Forward=%s, type=\"%s\"",
-             CONFIG_UART_BRIDGE_TX_PIN, CONFIG_UART_BRIDGE_RX_PIN, CONFIG_UART_BRIDGE_BAUD,
-#if ENABLE_UART_FORWARD
-             "ON",
-#else
-             "OFF",
-#endif
-             ACTION_TYPE);
+    // Start UDP receiver
+    xTaskCreate(udp_rx_task, "udp_rx_3333", 4096, NULL, 5, NULL);
 
-    // simple heartbeat so the task stays alive
-    const int64_t every_us = 3000000; // 3 s
-    int64_t next = esp_timer_get_time() + every_us;
+    // Heartbeat (optional)
+    int64_t next = esp_timer_get_time() + 3000000LL;
     while (true) {
         if (esp_timer_get_time() >= next) {
-            ESP_LOGI(TAG, "alive; waiting for mesh messages…");
-            next += every_us;
+            ESP_LOGI(TAG, "alive; mesh root listening on :%d", UDP_PORT);
+            next += 3000000LL;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
