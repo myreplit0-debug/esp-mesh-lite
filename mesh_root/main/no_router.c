@@ -1,4 +1,4 @@
-/* mesh_root/main/no_router.c — Root with UART mirror (stable, no esp_bridge)
+/* mesh_root/main/no_router.c — Root with UART mirror (stable)
  *
  * Mirrors any Mesh-Lite JSON whose {"type":"<ACTION_TYPE>"} matches
  * to UART1 TX=17 (via uart_bridge.c). Mesh SSID/password/channel are unchanged.
@@ -62,6 +62,11 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create the Wi-Fi netifs Mesh-Lite expects (STA and AP) BEFORE init
+    // (No extra components required; these are IDF helpers.)
+    esp_netif_create_default_wifi_sta();
+    esp_netif_create_default_wifi_ap();
 
     // UART1 (TX pin via Kconfig/sdkconfig.defaults; default TX=17)
     uart_bridge_init();
