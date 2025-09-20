@@ -1,10 +1,10 @@
 /*
- * Root node: UDP :3333 -> UART (TX=17)
+ * Root node: UDP :3333 from leaves -> TCP stream to one client on SoftAP
  * SPDX-License-Identifier: Apache-2.0
  */
-
 #include <string.h>
 #include <sys/socket.h>
+#include <netdb.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -13,20 +13,13 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_mesh_lite.h"
+#include "lwip/inet.h"
 #include "lwip/sockets.h"
-#include "driver/uart.h"
 
 #define TAG "mesh_root"
 
-/* ---- UART config ---- */
-#define UART_PORT     UART_NUM_2
-#define UART_TX_PIN   17
-#define UART_RX_PIN   -1
-#define UART_BAUD     115200
-#define UART_TXBUF_SZ 2048
-
-/* ---- UDP port (leafs send here) ---- */
-#define UDP_PORT      3333
+#define UDP_PORT    3333     // leaves send here
+#define TCP_PORT    5000     // client connects here on SoftAP IP (usually 192.168.4.1)
 
 static esp_err_t esp_storage_init(void)
 {
@@ -38,32 +31,46 @@ static esp_err_t esp_storage_init(void)
     return ret;
 }
 
-static void root_uart_init(void)
-{
-    const uart_config_t cfg = {
-        .baud_rate  = UART_BAUD,
-        .data_bits  = UART_DATA_8_BITS,
-        .parity     = UART_PARITY_DISABLE,
-        .stop_bits  = UART_STOP_BITS_1,
-        .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
-    uart_driver_install(UART_PORT, 0, UART_TXBUF_SZ, 0, NULL, 0);
-    uart_param_config(UART_PORT, &cfg);
-    uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN,
-                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+/* ---- Simple single-client TCP server on SoftAP IP ---- */
+static volatile int s_tcp_client = -1;
 
-    ESP_LOGI(TAG, "UART ready @%d (TX=%d)", UART_BAUD, UART_TX_PIN);
+static void tcp_server_task(void *arg)
+{
+    int srv = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (srv < 0) { ESP_LOGE(TAG, "TCP socket create failed"); vTaskDelete(NULL); }
+
+    int yes = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(TCP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "TCP bind failed"); close(srv); vTaskDelete(NULL);
+    }
+    listen(srv, 1);
+    ESP_LOGI(TAG, "TCP server listening on %d (connect to root SoftAP IP, usually 192.168.4.1)", TCP_PORT);
+
+    for (;;) {
+        struct sockaddr_in cli; socklen_t slen = sizeof(cli);
+        int c = accept(srv, (struct sockaddr *)&cli, &slen);
+        if (c < 0) continue;
+
+        if (s_tcp_client >= 0) { close(s_tcp_client); }
+        s_tcp_client = c;
+
+        char ip[16]; inet_ntop(AF_INET, &cli.sin_addr, ip, sizeof(ip));
+        ESP_LOGI(TAG, "TCP client connected from %s:%d", ip, ntohs(cli.sin_port));
+    }
 }
 
-static void root_udp_forward_task(void *arg)
+/* ---- UDP listener from leaves -> forward to TCP client ---- */
+static void udp_in_task(void *arg)
 {
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "UDP socket create failed");
-        vTaskDelete(NULL);
-        return;
-    }
+    if (sock < 0) { ESP_LOGE(TAG, "UDP socket create failed"); vTaskDelete(NULL); }
 
     struct sockaddr_in addr = {0};
     addr.sin_family      = AF_INET;
@@ -71,26 +78,29 @@ static void root_udp_forward_task(void *arg)
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ESP_LOGE(TAG, "UDP bind failed");
-        close(sock);
-        vTaskDelete(NULL);
-        return;
+        ESP_LOGE(TAG, "UDP bind failed"); close(sock); vTaskDelete(NULL);
     }
 
-    ESP_LOGI(TAG, "Root listening on UDP %d", UDP_PORT);
+    ESP_LOGI(TAG, "Root listening for leaf UDP on %d", UDP_PORT);
 
     for (;;) {
         char buf[256];
-        int len = recvfrom(sock, buf, sizeof(buf) - 1, 0, NULL, NULL);
-        if (len > 0) {
-            buf[len] = 0;
-            ESP_LOGI(TAG, "UDP -> UART: %s", buf);
-            uart_write_bytes(UART_PORT, buf, len);
-            uart_write_bytes(UART_PORT, "\r\n", 2);
+        int len = recvfrom(sock, buf, sizeof(buf)-1, 0, NULL, NULL);
+        if (len <= 0) continue;
+        buf[len] = 0;
+
+        ESP_LOGI(TAG, "UDP <-leaf: %s", buf);
+
+        int c = s_tcp_client;
+        if (c >= 0) {
+            // Append CRLF so the client can read line-based
+            send(c, buf, len, 0);
+            send(c, "\r\n", 2, 0);
         }
     }
 }
 
+/* --------------------------- app_main --------------------------- */
 void app_main(void)
 {
     esp_log_level_set("*", ESP_LOG_INFO);
@@ -99,15 +109,15 @@ void app_main(void)
     esp_netif_init();
     esp_event_loop_create_default();
 
-    // Mesh-Lite requires a config and returns void in this repo
+    // Mesh-Lite config in this repo returns void from init/start
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
-    cfg.join_mesh_without_configured_wifi = true;
+    cfg.join_mesh_without_configured_wifi = true;   // root without upstream router
 
-    esp_mesh_lite_init(&cfg);          // <-- NO ESP_ERROR_CHECK (returns void)
-    esp_mesh_lite_set_allowed_level(1); // force this device to be root
-    esp_mesh_lite_start();              // <-- NO ESP_ERROR_CHECK (returns void)
+    esp_mesh_lite_init(&cfg);
+    esp_mesh_lite_set_allowed_level(1);             // stay root
+    esp_mesh_lite_start();
 
-    root_uart_init();
-    xTaskCreate(root_udp_forward_task, "root_udp_fwd", 4096, NULL, 5, NULL);
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+    xTaskCreate(udp_in_task,   "udp_in",     4096, NULL, 5, NULL);
 }
