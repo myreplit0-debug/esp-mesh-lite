@@ -50,6 +50,9 @@ static inline void rbuf_push(const char *s) {
     taskEXIT_CRITICAL(&rlock);
 }
 
+/* forward decl so we can call it from udp_listener_task */
+static void sse_broadcast(const char *msg);
+
 /* -------- mesh info print (stock example style) -------- */
 static void print_system_info_timercb(TimerHandle_t xTimer)
 {
@@ -165,8 +168,7 @@ static void udp_listener_task(void *arg)
             buf[n] = 0;
             ESP_LOGI(TAG, "RX %dB from %s: %s", n, inet_ntoa(from.sin_addr), buf);
             rbuf_push(buf);
-            // (optional) broadcast to SSE clients; implemented below
-            extern void sse_broadcast(const char *msg);
+            // broadcast to SSE clients
             sse_broadcast(buf);
         }
     }
@@ -301,14 +303,16 @@ void app_main(void)
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = false;      // ROOT
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+    /* returns void in esp-mesh-lite v1.x */
+    esp_mesh_lite_init(&cfg);
 
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);                 // force root
 
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    /* returns void in esp-mesh-lite v1.x */
+    esp_mesh_lite_start();
 
     start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
