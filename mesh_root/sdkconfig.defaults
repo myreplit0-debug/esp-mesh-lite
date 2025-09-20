@@ -26,9 +26,7 @@ CONFIG_MESH_LITE_NODE_INFO_REPORT=y
 
 CONFIG_BRIDGE_SOFTAP_SSID_END_WITH_THE_MAC=y
 
-# SoftAP you’ll connect the phone (or another ESP32) to:
 CONFIG_BRIDGE_SOFTAP_SSID="meshmesh"
 CONFIG_BRIDGE_SOFTAP_PASSWORD="12345678"
 
-# Must match your running mesh (use the value you already had)
-# CONFIG_MESH_CHANNEL=5
+CONFIG_MESH_CHANNEL=6
