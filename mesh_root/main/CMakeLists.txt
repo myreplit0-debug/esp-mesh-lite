@@ -1,15 +1,17 @@
 idf_component_register(
     SRCS
         "no_router.c"
-        "uart_bridge.c"
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS
+        "."
     REQUIRES
+        esp_bridge        # <— needed for esp_bridge_* APIs
+        esp_mesh_lite
         esp_wifi
-        esp_event
-        esp_netif
+        esp_netif         # sockets/netif
+        lwip              # UDP sockets
         nvs_flash
-        driver
+        esp_event
         esp_timer
-        mesh_lite
+        driver
         json
 )
