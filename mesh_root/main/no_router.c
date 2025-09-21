@@ -310,18 +310,22 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    // optional: if bridge version has init, uncomment:
+    // ESP_ERROR_CHECK(esp_bridge_init());
+
     esp_bridge_create_all_netif();
     wifi_init();
 
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
-    cfg.join_mesh_without_configured_wifi = false;
-    esp_mesh_lite_init(&cfg);   // <- no ESP_ERROR_CHECK
+    cfg.join_mesh_without_configured_wifi = true;   // <-- allow start without STA creds
+    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);
-    esp_mesh_lite_start();      // <- no ESP_ERROR_CHECK
+    ESP_ERROR_CHECK(esp_mesh_lite_start());
 
     root_uart_init();
 
