@@ -13,7 +13,6 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <unistd.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -27,8 +26,8 @@
 
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "esp_netif.h"
 #include "esp_mesh_lite.h"
+#include "esp_bridge.h"
 
 #include "esp_http_server.h"
 
@@ -38,9 +37,6 @@
 #define RBUF_LINES      100
 #define LINE_MAX        256
 
-/* -------- forward decls -------- */
-static void sse_broadcast(const char *msg);
-
 /* -------- ring buffer for recent messages -------- */
 static char rbuf[RBUF_LINES][LINE_MAX];
 static size_t rhead = 0, rcount = 0;
@@ -48,52 +44,13 @@ static portMUX_TYPE rlock = portMUX_INITIALIZER_UNLOCKED;
 
 static inline void rbuf_push(const char *s) {
     taskENTER_CRITICAL(&rlock);
-    // Copy message into ring buffer slot
     strlcpy(rbuf[rhead], s, LINE_MAX);
     rhead = (rhead + 1) % RBUF_LINES;
-    if (rcount < RBUF_LINES) {
-        rcount++;
-    }
+    if (rcount < RBUF_LINES) rcount++;
     taskEXIT_CRITICAL(&rlock);
 }
 
-/* -------- simple ring-buffer reader for HTML page -------- */
-static void rbuf_dump(char *out, size_t max) {
-    // Dump messages in chronological order (oldest first)
-    size_t n = 0;
-    taskENTER_CRITICAL(&rlock);
-    size_t available = rcount;
-    size_t idx = (rhead + RBUF_LINES - rcount) % RBUF_LINES;
-    for (size_t i = 0; i < available; i++) {
-        n += snprintf(out + n, (n < max ? max - n : 0),
-                      "<div>%s</div>\n", rbuf[idx]);
-        idx = (idx + 1) % RBUF_LINES;
-    }
-    taskEXIT_CRITICAL(&rlock);
-}
-
-/* -------- HTTP server: serve main page & SSE -------- */
-static const char *INDEX_HTML = "<!DOCTYPE html>\n"
-"<html>\n<head>\n<title>Mesh Root Viewer</title></head>\n<body>\n"
-"<h2>Mesh-Lite Root – Recent Messages</h2>\n<div id='log' style='height: 300px; overflow-y: scroll; background: #f0f0f0; padding: 5px;'></div>\n"
-"<script>\n"
-"  const evtSource = new EventSource('/events');\n"
-"  evtSource.onmessage = function(e) {\n"
-"    const log = document.getElementById('log');\n"
-"    log.innerHTML += `<div>${e.data}</div>`;\n"
-"    log.scrollTop = log.scrollHeight;\n"
-"  };\n"
-"</script>\n"
-"</body>\n</html>\n";
-
-/* HTTP GET handler for the root page */
-static esp_err_t handle_get_root(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-}
-
-/* Server-Sent Events (SSE) handler for streaming messages */
+/* broadcast queue to HTTP SSE clients */
 typedef struct sse_client_s {
     httpd_handle_t hd;
     int fd;
@@ -103,20 +60,17 @@ typedef struct sse_client_s {
 static sse_client_t *g_clients = NULL;
 static portMUX_TYPE sse_lock = portMUX_INITIALIZER_UNLOCKED;
 
-/* Broadcast a message to all connected SSE clients */
 static void sse_broadcast(const char *msg) {
     taskENTER_CRITICAL(&sse_lock);
     sse_client_t **pp = &g_clients;
     while (*pp) {
-        sse_client_t *client = *pp;
-        if (httpd_queue_work(client->hd, (void(*)(void*)){ 
-                // This function runs in HTTP daemon's context to send the event
-                httpd_resp_send_chunk(client->hd, msg, strlen(msg)) 
-            }, NULL) != ESP_OK) {
-            // If we fail to queue work, assume client disconnected
-            *pp = client->next;
-            close(client->fd);
-            free(client);
+        sse_client_t *c = *pp;
+        char buf[LINE_MAX + 16];
+        int n = snprintf(buf, sizeof(buf), "data: %s\n\n", msg);
+        if (httpd_socket_send(c->hd, c->fd, buf, n, 0) < 0) {
+            // drop dead client
+            *pp = c->next;
+            free(c);
             continue;
         }
         pp = &(*pp)->next;
@@ -124,124 +78,27 @@ static void sse_broadcast(const char *msg) {
     taskEXIT_CRITICAL(&sse_lock);
 }
 
-/* HTTP handler for SSE endpoint "/events" */
-static esp_err_t handle_get_events(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/event-stream");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+/* -------- mesh info print (from example) -------- */
+static void print_system_info_timercb(TimerHandle_t xTimer) {
+    uint8_t primary = 0;
+    wifi_ap_record_t ap_info = {0};
+    wifi_second_chan_t second = 0;
+    uint8_t sta_mac[6] = {0};
 
-    // Construct a new client and add to list
-    sse_client_t *client = calloc(1, sizeof(sse_client_t));
-    if (!client) {
-        return ESP_ERR_NO_MEM;
+    if (esp_mesh_lite_get_level() > 1) {
+        esp_wifi_sta_get_ap_info(&ap_info);
     }
-    client->hd = req->handle;
-    client->fd = httpd_req_to_sockfd(req);
-    client->next = NULL;
-    // Set as long-running (HTTPD_CLOSING_FLAG_NONE means keep handler active)
-    httpd_req_set_pipe_mode(req, HTTPD_PIPE_MODE_BYTE);
-    httpd_resp_set_status(req, "200 OK");
-    httpd_resp_send_chunk(req, "\n", 1);  // send a dummy chunk to open the stream
+    esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
+    esp_wifi_get_channel(&primary, &second);
 
-    // Add this client to our list
-    taskENTER_CRITICAL(&sse_lock);
-    sse_client_t **pp = &g_clients;
-    while (*pp) pp = &(*pp)->next;
-    *pp = client;
-    taskEXIT_CRITICAL(&sse_lock);
-    ESP_LOGI(TAG, "SSE client connected (fd=%d)", client->fd);
-    return ESP_OK;
+    ESP_LOGI(TAG, "System info: channel:%d layer:%d self:" MACSTR 
+             " parent:" MACSTR " rssi:%d heap:%" PRIu32,
+             primary, esp_mesh_lite_get_level(),
+             MAC2STR(sta_mac), MAC2STR(ap_info.bssid),
+             (ap_info.rssi != 0 ? ap_info.rssi : -120), esp_get_free_heap_size());
 }
 
-/* Start the HTTP server with URI handlers */
-static esp_http_server_handle_t start_http_server(void) {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.lru_purge_enable = true;  // purge oldest if max open sockets exceeded
-    esp_http_server_handle_t server = NULL;
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t root_page = {
-            .uri      = "/",
-            .method   = HTTP_GET,
-            .handler  = handle_get_root,
-            .user_ctx = NULL
-        };
-        httpd_uri_t events_endpoint = {
-            .uri      = "/events",
-            .method   = HTTP_GET,
-            .handler  = handle_get_events,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &root_page);
-        httpd_register_uri_handler(server, &events_endpoint);
-    }
-    return server;
-}
-
-/* -------- UDP listener task -------- */
-static void udp_listen_task(void *pvParameters) {
-    char rx_buf[LINE_MAX];
-    char addr_str[128];
-    int addr_family = AF_INET;
-    int ip_protocol = IPPROTO_IP;
-    struct sockaddr_in6 dest_addr;
-
-    // Listen on UDP port 3333 on any IP (IPv4)
-    struct sockaddr_in *dest_addr_ipv4 = (struct sockaddr_in *)&dest_addr;
-    dest_addr_ipv4->sin_addr.s_addr = htonl(INADDR_ANY);
-    dest_addr_ipv4->sin_family = AF_INET;
-    dest_addr_ipv4->sin_port = htons(UDP_PORT);
-    int sock = socket(addr_family, SOCK_DGRAM, ip_protocol);
-    if (sock < 0) {
-        ESP_LOGE(TAG, "Unable to create UDP socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI(TAG, "UDP listener socket created");
-
-    int err = bind(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err < 0) {
-        ESP_LOGE(TAG, "UDP bind failed: errno %d", errno);
-        close(sock);
-        vTaskDelete(NULL);
-        return;
-    }
-    ESP_LOGI(TAG, "Listening on UDP port %d", UDP_PORT);
-
-    while (1) {
-        struct sockaddr_storage source_addr;
-        socklen_t socklen = sizeof(source_addr);
-        int len = recvfrom(sock, rx_buf, sizeof(rx_buf) - 1, 0,
-                           (struct sockaddr *)&source_addr, &socklen);
-        if (len < 0) {
-            ESP_LOGE(TAG, "UDP recvfrom failed: errno %d", errno);
-            break;
-        } else if (len == 0) {
-            // Empty packet, ignore
-            continue;
-        }
-        // Null-terminate the received data
-        rx_buf[len] = '\0';
-
-        // Get sender's address as string
-        if (source_addr.ss_family == AF_INET) {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str));
-        }
-        ESP_LOGI(TAG, "Received from %s: %s", addr_str, rx_buf);
-
-        // Log to ring buffer and broadcast to HTTP SSE clients
-        rbuf_push(rx_buf);
-        char sse_msg[LINE_MAX + 10];
-        snprintf(sse_msg, sizeof(sse_msg), "data: %s\n\n", rx_buf);
-        sse_broadcast(sse_msg);
-    }
-
-    if (sock != -1) {
-        ESP_LOGE(TAG, "Shutting down UDP socket.");
-        close(sock);
-    }
-    vTaskDelete(NULL);
-}
-
-/* -------- storage & Wi-Fi config (no esp_bridge) -------- */
+/* -------- storage & Wi-Fi config -------- */
 static esp_err_t esp_storage_init(void) {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -251,28 +108,18 @@ static esp_err_t esp_storage_init(void) {
     return ret;
 }
 
-static esp_err_t example_config(void) {
-    // Configure device as both Station and SoftAP (Mesh root uses SoftAP; STA is idle)
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-    esp_netif_create_default_wifi_ap();
+static void wifi_init(void) {
+    // Station configuration (leave SSID/PW empty to use any saved credentials or none)
+    wifi_config_t sta_cfg = {0};
+    esp_bridge_wifi_set_config(WIFI_IF_STA, &sta_cfg);
 
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-
-    // Station config (unused in no-router scenario, but needed to initialize interface)
-    wifi_config_t sta_cfg = { 0 };
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-
-    // SoftAP config (uses configured SSID/PWD on fixed channel)
+    // SoftAP configuration for the root (credentials from sdkconfig.defaults)
     wifi_config_t ap_cfg = {
         .ap = {
             .ssid = CONFIG_BRIDGE_SOFTAP_SSID,
             .password = CONFIG_BRIDGE_SOFTAP_PASSWORD,
             .ssid_len = 0,
-            .channel = CONFIG_MESH_CHANNEL,
+            .channel  = CONFIG_MESH_CHANNEL,
             .authmode = WIFI_AUTH_WPA_WPA2_PSK,
             .max_connection = 4,
         },
@@ -280,37 +127,185 @@ static esp_err_t example_config(void) {
     if (strlen(CONFIG_BRIDGE_SOFTAP_PASSWORD) == 0) {
         ap_cfg.ap.authmode = WIFI_AUTH_OPEN;
     }
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    esp_bridge_wifi_set_config(WIFI_IF_AP, &ap_cfg);
+}
 
-    ESP_LOGI(TAG, "Wi-Fi initialized. SoftAP SSID:%s Channel:%d", CONFIG_BRIDGE_SOFTAP_SSID, CONFIG_MESH_CHANNEL);
+static void app_wifi_set_softap_info(void) {
+    char ssid[33] = {0};
+    char psw[64]  = {0};
+    size_t ssid_sz = sizeof(ssid), psw_sz = sizeof(psw);
+
+    if (esp_mesh_lite_get_softap_ssid_from_nvs(ssid, &ssid_sz) != ESP_OK) {
+        strlcpy(ssid, CONFIG_BRIDGE_SOFTAP_SSID, sizeof(ssid));
+    }
+    if (esp_mesh_lite_get_softap_psw_from_nvs(psw, &psw_sz) != ESP_OK) {
+        strlcpy(psw, CONFIG_BRIDGE_SOFTAP_PASSWORD, sizeof(psw));
+    }
+    esp_mesh_lite_set_softap_info(ssid, psw);
+}
+
+/* -------- UDP listener task -------- */
+static void udp_listener_task(void *arg) {
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(UDP_PORT);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        ESP_LOGE(TAG, "bind() failed on :%d", UDP_PORT);
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "UDP listener ready on :%d", UDP_PORT);
+
+    for (;;) {
+        char buf[LINE_MAX];
+        struct sockaddr_in from;
+        socklen_t flen = sizeof(from);
+        int n = recvfrom(sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &flen);
+        if (n > 0) {
+            buf[n] = '\0';
+            ESP_LOGI(TAG, "RX %dB from %s: %s", n, inet_ntoa(from.sin_addr), buf);
+            rbuf_push(buf);
+            sse_broadcast(buf);
+        }
+    }
+}
+
+/* -------- HTTP server (index + SSE endpoint) -------- */
+static const char *INDEX_HTML =
+"<!doctype html><html><head><meta charset=utf-8>"
+"<meta name=viewport content='width=device-width,initial-scale=1'>"
+"<title>Mesh Viewer</title>"
+"<style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:0;padding:1rem;"
+"background:#111;color:#eee}#log{white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace}"
+".msg{padding:.25rem .5rem;border-bottom:1px solid #333}</style></head><body>"
+"<h2>Mesh Viewer (UDP :3333)</h2><div id=log></div>"
+"<script>"
+"const log=document.getElementById('log');"
+"function add(s){const d=document.createElement('div');d.className='msg';d.textContent=s;"
+"log.prepend(d);const m=log.children;while(m.length>200)log.removeChild(log.lastChild);}"
+"fetch('/history').then(r=>r.json()).then(a=>a.forEach(add));"
+"const es=new EventSource('/events'); es.onmessage=e=>add(e.data);"
+"</script></body></html>";
+
+static esp_err_t root_get_handler(httpd_req_t *req) {
+    (void) httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, INDEX_HTML, HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t history_get_handler(httpd_req_t *req) {
+    (void) httpd_resp_set_type(req, "application/json");
+    (void) httpd_resp_sendstr_chunk(req, "[");
+    // send stored messages from newest to oldest
+    taskENTER_CRITICAL(&rlock);
+    size_t n = rcount;
+    for (size_t i = 0; i < n; ++i) {
+        size_t idx = (rhead + RBUF_LINES - 1 - i) % RBUF_LINES;
+        char esc[LINE_MAX * 2];
+        // JSON-escape quotes and backslashes, replace CR/NL with space
+        int p = 0;
+        for (const char *s = rbuf[idx]; *s && p < (int)sizeof(esc) - 2; ++s) {
+            if (*s == '\\' || *s == '\"') {
+                esc[p++] = '\\'; esc[p++] = *s;
+            } else if (*s == '\r') {
+                continue;
+            } else if (*s == '\n') {
+                esc[p++] = ' ';
+            } else {
+                esc[p++] = *s;
+            }
+        }
+        esc[p] = '\0';
+        char chunk[LINE_MAX * 2 + 8];
+        snprintf(chunk, sizeof(chunk), "%s\"%s\"", (i == 0 ? "" : ","), esc);
+        (void) httpd_resp_sendstr_chunk(req, chunk);
+    }
+    taskEXIT_CRITICAL(&rlock);
+    (void) httpd_resp_sendstr_chunk(req, "]");
+    return httpd_resp_sendstr_chunk(req, NULL);  // end of JSON array (NULL -> terminator)
+}
+
+static esp_err_t events_get_handler(httpd_req_t *req) {
+    (void) httpd_resp_set_type(req, "text/event-stream");
+    (void) httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    (void) httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    (void) httpd_resp_sendstr_chunk(req, ":ok\n\n");  // send a comment line to establish SSE
+
+    // Register new SSE client
+    sse_client_t *c = calloc(1, sizeof(*c));
+    c->hd = req->handle;
+    c->fd = httpd_req_to_sockfd(req);
+    taskENTER_CRITICAL(&sse_lock);
+    c->next = g_clients;
+    g_clients = c;
+    taskEXIT_CRITICAL(&sse_lock);
+
+    // Keep the HTTP connection open indefinitely (until client disconnects)
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
     return ESP_OK;
 }
 
-/* -------- Application entry point -------- */
-void app_main(void) {
-    // Initialize storage and Wi-Fi
-    ESP_ERROR_CHECK(esp_storage_init());
-    ESP_ERROR_CHECK(example_config());
+static httpd_handle_t start_httpd(void) {
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.lru_purge_enable = true;
+    cfg.server_port = 80;  // HTTP server on SoftAP interface
 
-    // Start Mesh-Lite (initializes internal mesh networking tasks)
+    httpd_handle_t hd = NULL;
+    if (httpd_start(&hd, &cfg) != ESP_OK) {
+        ESP_LOGE(TAG, "httpd_start failed");
+        return NULL;
+    }
+    httpd_uri_t root = { .uri = "/",      .method = HTTP_GET, .handler = root_get_handler };
+    httpd_uri_t history = { .uri = "/history", .method = HTTP_GET, .handler = history_get_handler };
+    httpd_uri_t events = { .uri = "/events",  .method = HTTP_GET, .handler = events_get_handler };
+    (void) httpd_register_uri_handler(hd, &root);
+    (void) httpd_register_uri_handler(hd, &history);
+    (void) httpd_register_uri_handler(hd, &events);
+    ESP_LOGI(TAG, "HTTP server ready at http://192.168.5.1/");
+    return hd;
+}
+
+/* --------------------------- app_main --------------------------- */
+void app_main(void) {
+    ESP_ERROR_CHECK(esp_storage_init());
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Create default netifs (station + softAP)
+    esp_bridge_create_all_netif();
+    wifi_init();
+
+    // Mesh-Lite configuration
+    esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
+    cfg.join_mesh_ignore_router_status = true;
+    cfg.join_mesh_without_configured_wifi = false;  // Root node should not start mesh without router config
+    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+
+    app_wifi_set_softap_info();  // apply SoftAP credentials (from NVS or defaults)
+
+    ESP_LOGI(TAG, "Root node");
+    esp_mesh_lite_set_allowed_level(1);  // restrict this device to be root (level 1 only)
     ESP_ERROR_CHECK(esp_mesh_lite_start());
 
-    // Launch the UDP listener task
-    xTaskCreate(udp_listen_task, "udp_listen", 4096, NULL, 5, NULL);
+    // Launch services on root
+    (void) start_httpd();
+    xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
 
-    // Start the HTTP server for web viewing
-    start_http_server();
-
-    // (Optional) Print basic info about this node and network
-    uint8_t sta_mac[6];
-    wifi_ap_record_t ap_info;
-    (void)esp_wifi_get_mac(ESP_IF_WIFI_STA, sta_mac);
-    (void)esp_wifi_sta_get_ap_info(&ap_info);
-    ESP_LOGI(TAG, "System ready, Mesh-Lite node level=%d, softAP:%s connected (RSSI %d), free_heap=%" PRIu32,
-             esp_mesh_lite_get_level(),
-             CONFIG_BRIDGE_SOFTAP_SSID,
-             (ap_info.rssi != 0 ? ap_info.rssi : -120),
-             esp_get_free_heap_size());
+    // Start periodic system info print (every 10s)
+    TimerHandle_t t = xTimerCreate("print_system_info", pdMS_TO_TICKS(10000), pdTRUE, NULL, print_system_info_timercb);
+    if (t) {
+        xTimerStart(t, 0);
+    }
 }
