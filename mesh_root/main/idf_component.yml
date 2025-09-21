@@ -1,6 +1,5 @@
 version: "0.1.0"
-description: "Mesh Root App"
 dependencies:
   idf: ">=5.1"
   espressif/esp-mesh-lite:
-    override_path: ../components/mesh_lite
+    override_path: ../../components/mesh_lite
