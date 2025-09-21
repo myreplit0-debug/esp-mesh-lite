@@ -45,7 +45,7 @@
 
 #define UDP_PORT        3333
 #define RBUF_LINES      100
-#define MY_LINE_MAX     256   // avoid clash with sys/limits.h LINE_MAX
+#define MY_LINE_MAX     256   // renamed from LINE_MAX
 
 /* -------- ring buffer for recent messages -------- */
 static char rbuf[RBUF_LINES][MY_LINE_MAX];
@@ -88,13 +88,13 @@ static void sse_broadcast(const char *msg) {
     taskEXIT_CRITICAL(&sse_lock);
 }
 
-/* -------- mesh info print (simplified to avoid format errors) -------- */
+/* -------- mesh info print -------- */
 static void print_system_info_timercb(TimerHandle_t xTimer) {
     (void)xTimer;
 
     uint8_t primary = 0;
     wifi_second_chan_t second = 0;
-    wifi_ap_record_t ap_info = (wifi_ap_record_t){0};
+    wifi_ap_record_t ap_info = {0};
 
     if (esp_mesh_lite_get_level() > 1) {
         (void)esp_wifi_sta_get_ap_info(&ap_info);
@@ -119,11 +119,9 @@ static esp_err_t esp_storage_init(void) {
 }
 
 static void wifi_init(void) {
-    // Station configuration (leave SSID/PW empty to use any saved credentials or none)
     wifi_config_t sta_cfg = (wifi_config_t){0};
     esp_bridge_wifi_set_config(WIFI_IF_STA, &sta_cfg);
 
-    // SoftAP configuration for the root (credentials from sdkconfig.defaults)
     wifi_config_t ap_cfg = {
         .ap = {
             .ssid = CONFIG_BRIDGE_SOFTAP_SSID,
@@ -166,14 +164,9 @@ static void root_uart_init(void) {
     };
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT, 2048, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
-    ESP_ERROR_CHECK(uart_set_pin(
-        UART_PORT,
-        UART_TX_PIN,                // TX (root -> UI)
-        UART_RX_PIN,                // RX (unused, but must be set)
-        UART_PIN_NO_CHANGE,
-        UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT, UART_TX_PIN, UART_RX_PIN,
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 
-    // Optional: keep RX pulled high even if unused
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << UART_RX_PIN,
         .mode         = GPIO_MODE_INPUT,
@@ -188,8 +181,6 @@ static void root_uart_init(void) {
 
 /* -------- UDP listener task -------- */
 static void udp_listener_task(void *arg) {
-    (void)arg;
-
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "socket() failed");
@@ -222,14 +213,13 @@ static void udp_listener_task(void *arg) {
             rbuf_push(buf);
             sse_broadcast(buf);
 
-            /* ---- mirror to UART as a single line ---- */
             uart_write_bytes(UART_PORT, buf, n);
             uart_write_bytes(UART_PORT, "\n", 1);
         }
     }
 }
 
-/* -------- HTTP server (index + SSE endpoint) -------- */
+/* -------- HTTP server -------- */
 static const char *INDEX_HTML =
 "<!doctype html><html><head><meta charset=utf-8>"
 "<meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -254,7 +244,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
 static esp_err_t history_get_handler(httpd_req_t *req) {
     (void) httpd_resp_set_type(req, "application/json");
     (void) httpd_resp_sendstr_chunk(req, "[");
-    // send stored messages from newest to oldest
     taskENTER_CRITICAL(&rlock);
     size_t n = rcount;
     for (size_t i = 0; i < n; ++i) {
@@ -262,15 +251,10 @@ static esp_err_t history_get_handler(httpd_req_t *req) {
         char esc[MY_LINE_MAX * 2];
         int p = 0;
         for (const char *s = rbuf[idx]; *s && p < (int)sizeof(esc) - 2; ++s) {
-            if (*s == '\\' || *s == '\"') {
-                esc[p++] = '\\'; esc[p++] = *s;
-            } else if (*s == '\r') {
-                continue;
-            } else if (*s == '\n') {
-                esc[p++] = ' ';
-            } else {
-                esc[p++] = *s;
-            }
+            if (*s == '\\' || *s == '\"') { esc[p++] = '\\'; esc[p++] = *s; }
+            else if (*s == '\r') { continue; }
+            else if (*s == '\n') { esc[p++] = ' '; }
+            else { esc[p++] = *s; }
         }
         esc[p] = '\0';
         char chunk[MY_LINE_MAX * 2 + 8];
@@ -296,9 +280,7 @@ static esp_err_t events_get_handler(httpd_req_t *req) {
     g_clients = c;
     taskEXIT_CRITICAL(&sse_lock);
 
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    while (1) { vTaskDelay(pdMS_TO_TICKS(1000)); }
     return ESP_OK;
 }
 
@@ -334,21 +316,19 @@ void app_main(void) {
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = false;
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
-
+    esp_mesh_lite_init(&cfg);   // <- no ESP_ERROR_CHECK
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node");
     esp_mesh_lite_set_allowed_level(1);
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    esp_mesh_lite_start();      // <- no ESP_ERROR_CHECK
 
     root_uart_init();
 
     (void) start_httpd();
     xTaskCreate(udp_listener_task, "udp_listener", 4096, NULL, 5, NULL);
 
-    TimerHandle_t t = xTimerCreate("print_system_info", pdMS_TO_TICKS(10000), pdTRUE, NULL, print_system_info_timercb);
-    if (t) {
-        xTimerStart(t, 0);
-    }
+    TimerHandle_t t = xTimerCreate("print_system_info", pdMS_TO_TICKS(10000),
+                                   pdTRUE, NULL, print_system_info_timercb);
+    if (t) { xTimerStart(t, 0); }
 }
