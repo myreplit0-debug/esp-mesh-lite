@@ -314,14 +314,19 @@ void app_main(void) {
     cfg.join_mesh_ignore_router_status = true;
     cfg.join_mesh_without_configured_wifi = true;   // allow boot with no STA creds
     ESP_LOGI(TAG, "Mesh-Lite init…");
-    esp_mesh_lite_init(&cfg);                       // void in this version
+    esp_mesh_lite_init(&cfg);   // void in this version
 
     app_wifi_set_softap_info();
 
     ESP_LOGI(TAG, "Root node; starting Mesh-Lite…");
     esp_mesh_lite_set_allowed_level(1);
-    esp_mesh_lite_start();                          // void in this version
+    esp_mesh_lite_start();      // void in this version
     ESP_LOGI(TAG, "Mesh-Lite started.");
+
+    // --- AP-only: stop STA reconnect spam ---
+    ESP_ERROR_CHECK(esp_wifi_set_auto_connect(false));
+    ESP_ERROR_CHECK(esp_wifi_disconnect());
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 
     root_uart_init();
 
