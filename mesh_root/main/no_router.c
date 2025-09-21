@@ -19,7 +19,7 @@
 #include "freertos/task.h"
 #include "freertos/timers.h"
 #include "freertos/queue.h"
-
+#include <unistd.h>
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_timer.h"
@@ -162,5 +162,25 @@ static void root_uart_init(void) {
         .stop_bits  = UART_STOP_BITS_1,
         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
-    };
+    }};
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT, 2048, 0, 0, NULL, 0));
+ESP_ERROR_CHECK(uart_param_config(UART_PORT, &cfg));
+    ESP_ERROR_CHECK(uart_set_pin(
+        UART_PORT,
+        UART_TX_PIN,                // TX (root -> UI)
+        UART_RX_PIN,                // RX (unused, but must be set)
+        UART_PIN_NO_CHANGE,
+        UART_PIN_NO_CHANGE));
+
+    // Optional: keep RX pulled high even if unused
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << UART_RX_PIN,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = 1,
+        .pull_down_en = 0,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io);
+
+    ESP_LOGI(TAG, "UART ready @%d (TX=%d RX=%d)", UART_BAUD, UART_TX_PIN, UART_RX_PIN);
+}
