@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS "no_router.c"
+         "napt_stub.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi
