@@ -1,20 +1,22 @@
 idf_component_register(
     SRCS "no_router.c"
     INCLUDE_DIRS "."
-    REQUIRES 
+    REQUIRES
         esp_wifi
         esp_event
+        esp_netif
         nvs_flash
         lwip
         esp_timer
         esp_http_server
         mesh_lite
         json
+        driver          # <-- REQUIRED for UART
 )
 
-# Disable treating warnings as errors, and suppress specific common warnings
-target_compile_options(${COMPONENT_LIB} PRIVATE 
-    -Wno-error                        # Do not treat any warnings as errors3
-    -Wno-unused-function              # Ignore unused-function warnings 
-    -Wno-implicit-function-declaration# Ignore missing declaration warnings
+# Stop warnings killing the build
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wno-error
+    -Wno-unused-function
+    -Wno-implicit-function-declaration
 )
