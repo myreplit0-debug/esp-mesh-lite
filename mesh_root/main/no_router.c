@@ -30,22 +30,21 @@
 #include "esp_event.h"
 #include "esp_mesh_lite.h"
 #include "esp_bridge.h"
-
 #include "esp_http_server.h"
 
 /* === UART mirror (root -> external UI) === */
 #include "driver/uart.h"
 #include "driver/gpio.h"
-#define UART_PORT   UART_NUM_2     // use UART2 for mirror
-#define UART_TX_PIN 17             // Root TX -> UI RX
-#define UART_RX_PIN 16             // not used here but must be set
-#define UART_BAUD   9600           // match your UI device
+#define UART_PORT   UART_NUM_2
+#define UART_TX_PIN 17
+#define UART_RX_PIN 16
+#define UART_BAUD   9600
 
 #define TAG "no_router_root"
 
 #define UDP_PORT        3333
 #define RBUF_LINES      100
-#define MY_LINE_MAX     256   // renamed from LINE_MAX
+#define MY_LINE_MAX     256   // avoid conflict with system LINE_MAX
 
 /* -------- ring buffer for recent messages -------- */
 static char rbuf[RBUF_LINES][MY_LINE_MAX];
@@ -60,7 +59,7 @@ static inline void rbuf_push(const char *s) {
     taskEXIT_CRITICAL(&rlock);
 }
 
-/* broadcast queue to HTTP SSE clients */
+/* -------- SSE client list -------- */
 typedef struct sse_client_s {
     httpd_handle_t hd;
     int fd;
@@ -78,7 +77,6 @@ static void sse_broadcast(const char *msg) {
         char buf[MY_LINE_MAX + 16];
         int n = snprintf(buf, sizeof(buf), "data: %s\n\n", msg);
         if (httpd_socket_send(c->hd, c->fd, buf, n, 0) < 0) {
-            // drop dead client
             *pp = c->next;
             free(c);
             continue;
@@ -88,13 +86,12 @@ static void sse_broadcast(const char *msg) {
     taskEXIT_CRITICAL(&sse_lock);
 }
 
-/* -------- mesh info print -------- */
+/* -------- periodic info -------- */
 static void print_system_info_timercb(TimerHandle_t xTimer) {
     (void)xTimer;
-
     uint8_t primary = 0;
     wifi_second_chan_t second = 0;
-    wifi_ap_record_t ap_info = {0};
+    wifi_ap_record_t ap_info = (wifi_ap_record_t){0};
 
     if (esp_mesh_lite_get_level() > 1) {
         (void)esp_wifi_sta_get_ap_info(&ap_info);
@@ -310,22 +307,21 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // optional: if bridge version has init, uncomment:
-    // ESP_ERROR_CHECK(esp_bridge_init());
-
     esp_bridge_create_all_netif();
     wifi_init();
 
     esp_mesh_lite_config_t cfg = ESP_MESH_LITE_DEFAULT_INIT();
     cfg.join_mesh_ignore_router_status = true;
-    cfg.join_mesh_without_configured_wifi = true;   // <-- allow start without STA creds
-    ESP_ERROR_CHECK(esp_mesh_lite_init(&cfg));
+    cfg.join_mesh_without_configured_wifi = true;   // allow boot with no STA creds
+    ESP_LOGI(TAG, "Mesh-Lite init…");
+    esp_mesh_lite_init(&cfg);                       // void in this version
 
     app_wifi_set_softap_info();
 
-    ESP_LOGI(TAG, "Root node");
+    ESP_LOGI(TAG, "Root node; starting Mesh-Lite…");
     esp_mesh_lite_set_allowed_level(1);
-    ESP_ERROR_CHECK(esp_mesh_lite_start());
+    esp_mesh_lite_start();                          // void in this version
+    ESP_LOGI(TAG, "Mesh-Lite started.");
 
     root_uart_init();
 
