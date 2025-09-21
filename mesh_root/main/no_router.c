@@ -324,7 +324,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "Mesh-Lite started.");
 
     // --- AP-only: stop STA reconnect spam ---
-    ESP_ERROR_CHECK(esp_wifi_set_auto_connect(false));
+    ESP_ERROR_CHECK(esp_wifi_clear_fast_connect());   // fixed: supported API
     ESP_ERROR_CHECK(esp_wifi_disconnect());
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 
