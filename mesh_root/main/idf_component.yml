@@ -1,5 +1,8 @@
 version: "0.1.0"
+description: "Root app for Mesh-Lite + UART mirror"
 dependencies:
   idf: ">=5.1"
-  espressif/esp-mesh-lite:
-    override_path: ../../components/mesh_lite
+  espressif/esp-mesh-lite: "~1.0.2"
+  espressif/qrcode: "^0.1.0"
+  espressif/iot_bridge: "^1.0.1"
+  espressif/cmake_utilities: "0.*"
