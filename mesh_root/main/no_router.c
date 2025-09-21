@@ -45,16 +45,16 @@
 
 #define UDP_PORT        3333
 #define RBUF_LINES      100
-#define LINE_MAX        256
+#define MY_LINE_MAX     256   // avoid clash with sys/limits.h LINE_MAX
 
 /* -------- ring buffer for recent messages -------- */
-static char rbuf[RBUF_LINES][LINE_MAX];
+static char rbuf[RBUF_LINES][MY_LINE_MAX];
 static size_t rhead = 0, rcount = 0;
 static portMUX_TYPE rlock = portMUX_INITIALIZER_UNLOCKED;
 
 static inline void rbuf_push(const char *s) {
     taskENTER_CRITICAL(&rlock);
-    strlcpy(rbuf[rhead], s, LINE_MAX);
+    strlcpy(rbuf[rhead], s, MY_LINE_MAX);
     rhead = (rhead + 1) % RBUF_LINES;
     if (rcount < RBUF_LINES) rcount++;
     taskEXIT_CRITICAL(&rlock);
@@ -75,7 +75,7 @@ static void sse_broadcast(const char *msg) {
     sse_client_t **pp = &g_clients;
     while (*pp) {
         sse_client_t *c = *pp;
-        char buf[LINE_MAX + 16];
+        char buf[MY_LINE_MAX + 16];
         int n = snprintf(buf, sizeof(buf), "data: %s\n\n", msg);
         if (httpd_socket_send(c->hd, c->fd, buf, n, 0) < 0) {
             // drop dead client
@@ -94,7 +94,7 @@ static void print_system_info_timercb(TimerHandle_t xTimer) {
 
     uint8_t primary = 0;
     wifi_second_chan_t second = 0;
-    wifi_ap_record_t ap_info = {0};
+    wifi_ap_record_t ap_info = (wifi_ap_record_t){0};
 
     if (esp_mesh_lite_get_level() > 1) {
         (void)esp_wifi_sta_get_ap_info(&ap_info);
@@ -188,6 +188,8 @@ static void root_uart_init(void) {
 
 /* -------- UDP listener task -------- */
 static void udp_listener_task(void *arg) {
+    (void)arg;
+
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "socket() failed");
@@ -210,7 +212,7 @@ static void udp_listener_task(void *arg) {
     ESP_LOGI(TAG, "UDP listener ready on :%d", UDP_PORT);
 
     for (;;) {
-        char buf[LINE_MAX];
+        char buf[MY_LINE_MAX];
         struct sockaddr_in from;
         socklen_t flen = sizeof(from);
         int n = recvfrom(sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &flen);
@@ -257,7 +259,7 @@ static esp_err_t history_get_handler(httpd_req_t *req) {
     size_t n = rcount;
     for (size_t i = 0; i < n; ++i) {
         size_t idx = (rhead + RBUF_LINES - 1 - i) % RBUF_LINES;
-        char esc[LINE_MAX * 2];
+        char esc[MY_LINE_MAX * 2];
         int p = 0;
         for (const char *s = rbuf[idx]; *s && p < (int)sizeof(esc) - 2; ++s) {
             if (*s == '\\' || *s == '\"') {
@@ -271,7 +273,7 @@ static esp_err_t history_get_handler(httpd_req_t *req) {
             }
         }
         esc[p] = '\0';
-        char chunk[LINE_MAX * 2 + 8];
+        char chunk[MY_LINE_MAX * 2 + 8];
         snprintf(chunk, sizeof(chunk), "%s\"%s\"", (i == 0 ? "" : ","), esc);
         (void) httpd_resp_sendstr_chunk(req, chunk);
     }
