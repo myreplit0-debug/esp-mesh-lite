@@ -38,7 +38,7 @@
 #define UART_PORT   UART_NUM_2
 #define UART_TX_PIN 17
 #define UART_RX_PIN 16
-#define UART_BAUD   9600
+#define UART_BAUD   115200
 
 #define TAG "no_router_root"
 
